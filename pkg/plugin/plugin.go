@@ -28,40 +28,45 @@ func (dp *DriftPlugin) Name() string {
 	return "DriftPlugin"
 }
 
-// Filter 方法：节点可用性过滤逻辑
+/*
+Filter:
+- 如果 Pod 没有 gpu-points（或为0），直接 Success
+- 否则：sum(node上所有pod的gpu-points) + 当前pod的gpu-points <= 1000 * gpu_count
+- 其它原生 Filter（资源、亲和性、污点等）不在这里做，交给默认插件链
+*/
 func (dp *DriftPlugin) Filter(ctx context.Context, state *framework.CycleState,
 	pod *v1.Pod, nodeInfo *framework.NodeInfo) *framework.Status {
-
-	// 获取节点总资源和已分配资源
-	allocable := nodeInfo.Allocatable // 可分配资源
-	requested := nodeInfo.Requested   // 已请求资源
-
-	// 计算节点剩余资源
-	freeCPU := allocable.MilliCPU - requested.MilliCPU // 剩余 CPU (毫核)
-	freeMem := allocable.Memory - requested.Memory     // 剩余内存 (字节)
-
-	// 计算待调度Pod所需 CPU 和内存总请求量
-	var podCPU int64 = 0
-	var podMem int64 = 0
-	for _, c := range pod.Spec.Containers {
-		// 累加每个容器的 Requests 资源
-		cpuQty := c.Resources.Requests.Cpu()    // v1.ResourceList中CPU数量
-		memQty := c.Resources.Requests.Memory() // 内存
-		podCPU += cpuQty.MilliValue()           // CPU以m单位
-		podMem += memQty.Value()                // 内存字节值
+	need, st := gpuPointsFromPod(pod)
+	if st != nil && !st.IsSuccess() {
+		return st
 	}
-
-	// 判断节点是否有足够余量容纳该Pod
-	if freeCPU < podCPU || freeMem < podMem {
-		// 节点资源不足，返回 Unschedulable 状态和原因
-		return framework.NewStatus(framework.Unschedulable, "节点资源不足，无法调度该Pod")
+	if need == 0 {
+		// Pod 不需要 GPU，直接通过
+		return framework.NewStatus(framework.Success, "")
 	}
-
-	// 资源充足，节点通过筛选
+	if need > GPUPointsPerCard {
+		return framework.NewStatus(
+			framework.Unschedulable,
+			fmt.Sprintf("pod gpu-points %d exceeds per-card limit %d", need, GPUPointsPerCard),
+		)
+	}
+	capPoints, st := gpuCapacityPointsFromLabel(nodeInfo)
+	if st != nil && !st.IsSuccess() {
+		return st
+	}
+	if capPoints <= 0 {
+		return framework.NewStatus(framework.Unschedulable, "node has 0 allocatable GPUs for gpu-points sharing")
+	}
+	usedPoints := gpuPointsUsedOnNode(nodeInfo)
+	if usedPoints+need > capPoints {
+		return framework.NewStatus(
+			framework.Unschedulable,
+			fmt.Sprintf("gpu-points exceeded: used=%d need=%d cap=%d", usedPoints, need, capPoints),
+		)
+	}
 	return framework.NewStatus(framework.Success, "")
 }
 
-// Score 方法：节点评分逻辑（0-100分，分值越高表示越适合）
 func (dp *DriftPlugin) Score(ctx context.Context, state *framework.CycleState,
 	pod *v1.Pod, nodeName string) (int64, *framework.Status) {
 
@@ -72,8 +77,6 @@ func (dp *DriftPlugin) Score(ctx context.Context, state *framework.CycleState,
 		return 0, framework.NewStatus(framework.Error, fmt.Sprintf("获取节点信息失败: %v", err))
 	}
 
-	// alloc := nodeInfo.AllocatableResource()
-	// used := nodeInfo.RequestedResource()
 	allocable := nodeInfo.Allocatable // 可分配资源
 	requested := nodeInfo.Requested   // 已请求资源
 
@@ -94,10 +97,31 @@ func (dp *DriftPlugin) Score(ctx context.Context, state *framework.CycleState,
 	}
 
 	// 按权重计算综合得分（CPU权重0.8，内存权重0.2）
-	totalScore := freeCPUFrac*0.8 + freeMemFrac*0.2
+	rate := freeCPUFrac*0.8 + freeMemFrac*0.2
+
+	needGPU, st := gpuPointsFromPod(pod)
+	if st != nil {
+		return 0, st
+	}
+
+	finalRate := rate
+	if needGPU > 0 {
+		// Pod 需要 GPU，考虑 GPU 资源
+		capPoints, st := gpuCapacityPointsFromLabel(nodeInfo)
+		if st != nil {
+			return 0, st
+		}
+		usedPoints := gpuPointsUsedOnNode(nodeInfo)
+		gpuRate := float64(capPoints-usedPoints) / float64(capPoints)
+		if gpuRate < 0 {
+			gpuRate = 0
+		}
+		// 综合 CPU、内存和 GPU 得分（GPU 权重0.4，CPU+内存权重0.6）
+		finalRate = (rate*0.6 + gpuRate*0.4)
+	}
 
 	// 转换为调度器要求的整数分值 (0~100)
-	score := int64(totalScore * 100)
+	score := int64(finalRate * 100)
 	if score < 0 {
 		score = 0
 	}

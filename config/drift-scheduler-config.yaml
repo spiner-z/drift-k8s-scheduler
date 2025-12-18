@@ -15,8 +15,6 @@ data:
     - schedulerName: drift-scheduler
       plugins:
         filter:
-          disabled:
-          - name: NodeResourcesFit
           enabled:
           - name: DriftPlugin
         score:
