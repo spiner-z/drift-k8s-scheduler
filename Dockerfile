@@ -2,7 +2,7 @@
 #   docker build -t crater-harbor.act.buaa.edu.cn/user-zhangry/drift-k8s-scheduler:v1 .
 
 # 使用官方Go镜像进行编译
-FROM crater-harbor.act.buaa.edu.cn/docker.io/golang:1.22
+FROM crater-harbor.act.buaa.edu.cn/docker.io/golang:1.22 as builder
 ENV GOPROXY=https://goproxy.cn,direct \
     CGO_ENABLED=0 \
     GOOS=linux \
