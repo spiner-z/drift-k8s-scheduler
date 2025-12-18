@@ -30,7 +30,7 @@ spec:
 
       containers:
       - name: drift-scheduler
-        image: crater-harbor.act.buaa.edu.cn/user-zhangry/drift-k8s-scheduler:v1
+        image: crater-harbor.act.buaa.edu.cn/user-zhangry/drift-k8s-scheduler:v3
         imagePullPolicy: IfNotPresent
         command: ["/drift-scheduler"]
         args:

@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-share-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gpu-share-demo
+  template:
+    metadata:
+      labels:
+        app: gpu-share-demo
+        drift.io/gpu-points: "500"
+    spec:
+      schedulerName: drift-scheduler
+      containers:
+        - name: demo
+          image: gpu-harbor.act.buaa.edu.cn/user-liuyizhou/jupyter-base:py3.12-v1.2.1
+          resources:
+            requests:
+              cpu: "1500m"
+              memory: 4096Mi
+              nvidia.com/v100: "1"
+            limits:
+              cpu: "1500m"
+              memory: 4096Mi
+              nvidia.com/v100: "1"
