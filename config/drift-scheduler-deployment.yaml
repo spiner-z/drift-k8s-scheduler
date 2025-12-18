@@ -12,35 +12,54 @@ spec:
     metadata:
       labels:
         app: drift-scheduler
-        component: scheduler
-        tier: control-plane
     spec:
-      serviceAccountName: drift-scheduler       # 使用前面创建的 SA
+      securityContext:
+        runAsUser: 0       
+        runAsGroup: 0       
+        fsGroup: 0
+      serviceAccountName: drift-scheduler
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+      - key: "node-role.kubernetes.io/master"
+        operator: "Exists"
+        effect: "NoSchedule"
+
       containers:
-        - name: drift-scheduler
-          image: yourrepo/drift-k8s-scheduler:v1   # 使用之前构建的镜像
-          imagePullPolicy: IfNotPresent
-          command:
-            - /drift-scheduler
-            - --config=/etc/kubernetes/scheduler-config.yaml
-            - --v=2                            # 日志级别，可调高以调试
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: 10259
-              scheme: HTTPS
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: 10259
-              scheme: HTTPS
-          volumeMounts:
-            - name: config
-              mountPath: /etc/kubernetes/       # 挂载ConfigMap中配置文件
-      volumes:
+      - name: drift-scheduler
+        image: crater-harbor.act.buaa.edu.cn/user-zhangry/drift-k8s-scheduler:v1
+        imagePullPolicy: IfNotPresent
+        command: ["/drift-scheduler"]
+        args:
+        - --config=/etc/kubernetes/scheduler-config.yaml
+        - --v=4
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 10259
+            scheme: HTTPS
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 10259
+            scheme: HTTPS
+        volumeMounts:
         - name: config
-          configMap:
-            name: drift-scheduler-config
-            items:
-              - key: scheduler-config.yaml
-                path: scheduler-config.yaml
+          mountPath: /etc/kubernetes/scheduler-config.yaml
+          subPath: scheduler-config.yaml
+          readOnly: true
+        - name: kubeconfig
+          mountPath: /etc/kubernetes/scheduler.conf
+          readOnly: true
+
+      volumes:
+      - name: config
+        configMap:
+          name: drift-scheduler-config
+      - name: kubeconfig
+        hostPath:
+          path: /etc/kubernetes/scheduler.conf
+          type: File

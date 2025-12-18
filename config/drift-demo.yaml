@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: driftsched-demo-pod
+spec:
+  schedulerName: drift-scheduler
+  containers:
+  - name: nginx
+    image: crater-harbor.act.buaa.edu.cn/docker.io/nginx:alpine
+    resources:
+      requests:
+        cpu: 500m
+        memory: 256Mi
