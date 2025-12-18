@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: drift-scheduler-config
+  namespace: kube-system
+data:
+  scheduler-config.yaml: |-
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      leaderElect: true
+      resourceName: drift-scheduler
+      resourceNamespace: kube-system
+    clientConnection:
+      kubeconfig: /etc/kubernetes/scheduler.conf    # 调度器使用的kubeconfig路径（集群内通常挂载serviceaccount自动提供）
+    profiles:
+      - schedulerName: drift-scheduler              # 调度器名称，用于 Pod .spec.schedulerName 匹配
+        plugins:
+          filter:
+            disabled:
+              - name: NodeResourcesFit             # 禁用默认资源匹配插件，改用自定义逻辑
+            enabled:
+              - name: DriftPlugin                  # 启用自定义Filter插件
+          score:
+            disabled:
+              - name: NodeResourcesFit             # 禁用默认资源打分
+            enabled:
+              - name: DriftPlugin                  # 启用自定义Score插件
+                weight: 1                          # 插件权重（因仅一个插件，这里设为1）
