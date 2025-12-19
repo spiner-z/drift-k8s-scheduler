@@ -1,17 +1,40 @@
 package plugin
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	simontype "github.com/spiner-z/drift-k8s-scheduler/pkg/type"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 	schedulerutil "k8s.io/kubernetes/pkg/scheduler/util"
 )
 
 var GpuNumTypeList = []string{"PureCpu", "ShareGpu", "OneGpu", "TwoGpu", "FourGpu", "EightGpu", "Others"}
+
+const (
+	Q1LackBoth  = "q1_lack_both"
+	Q2LackGpu   = "q2_lack_gpu"
+	Q3Satisfied = "q3_satisfied"
+	Q4LackCpu   = "q4_lack_cpu"
+	XLSatisfied = "xl_satisfied"
+	XRLackCPU   = "xr_lack_cpu"
+	NoAccess    = "no_access"
+)
+
+var FragRatioDataMap = map[string]int{
+	Q1LackBoth:  0,
+	Q2LackGpu:   1,
+	Q3Satisfied: 2,
+	Q4LackCpu:   3,
+	XLSatisfied: 4,
+	XRLackCPU:   5,
+	NoAccess:    6,
+}
 
 func GetTypicalPods(allPods []*v1.Pod) simontype.TargetPodList {
 	tgtPodResCntMap := map[simontype.PodResource]float64{}
@@ -105,6 +128,29 @@ func SortTargetPodInDecreasingCount(tgtPodResMap map[simontype.PodResource]float
 	return pl
 }
 
+func GetNodeResourceViaNodeInfo(nodeInfo *framework.NodeInfo) (nodeRes simontype.NodeResource) {
+	node := nodeInfo.Node()
+	milliCpuLeft := node.Status.Allocatable.Cpu().MilliValue() - nodeInfo.Requested.MilliCPU
+
+	milliGpuLeftList := []int64{}
+	gpuNum := int(getGpuCountFromNode(nodeInfo))
+	leftGpuPoints := gpuNum*int(GPUPointsPerCard) - int(gpuPointsUsedOnNode(nodeInfo))
+	for i := 0; i < gpuNum; i++ {
+		avgGpuPointsLeft := int64(leftGpuPoints / gpuNum)
+		milliGpuLeftList = append(milliGpuLeftList, avgGpuPointsLeft)
+	}
+
+	return simontype.NodeResource{
+		NodeName:         node.Name,
+		MilliCpuLeft:     milliCpuLeft,
+		MilliCpuCapacity: node.Status.Allocatable.Cpu().MilliValue(),
+		MilliGpuLeftList: milliGpuLeftList,
+		GpuNumber:        gpuNum,
+		GpuType:          "",
+		// GpuAffinity:      nodeGpuAffinity,
+	}
+}
+
 func GetPodResource(pod *v1.Pod) simontype.PodResource {
 	gpuNumber, _ := gpuCountFromPod(pod)
 	gpuMilli, _ := gpuPointsFromPod(pod)
@@ -192,4 +238,152 @@ func allPodsDemo() []*v1.Pod {
 	}
 
 	return pods
+}
+
+func NodeGpuShareFragAmountScore(nodeRes simontype.NodeResource, typicalPods simontype.TargetPodList) float64 {
+	fragAmount := NodeGpuShareFragAmount(nodeRes, typicalPods)
+	return fragAmount.FragAmountSumExceptQ3()
+}
+
+func (fa FragAmount) FragAmountSumExceptQ3() (out float64) {
+	for i := 0; i < len(FragRatioDataMap); i++ {
+		if i != FragRatioDataMap[Q3Satisfied] {
+			out += fa.Data[i]
+		}
+	}
+	return out
+}
+
+type FragAmount struct {
+	NodeName string
+	Data     []float64
+}
+
+func NewFragAmount(nodeName string, data []float64) FragAmount {
+	fragAmount := FragAmount{NodeName: nodeName, Data: make([]float64, len(data))}
+	copy(fragAmount.Data, data)
+	return fragAmount
+}
+
+func NodeGpuShareFragAmount(nodeRes simontype.NodeResource, typicalPods simontype.TargetPodList) FragAmount {
+	data := make([]float64, len(FragRatioDataMap))
+	fragAmount := NewFragAmount(nodeRes.NodeName, data)
+	for _, pod := range typicalPods {
+		freq := pod.Percentage
+		if freq < 0 || freq > 1 {
+			continue
+		}
+		fragType := GetNodePodFrag(nodeRes, pod.TargetPodResource)
+		gpuMilliLeftTotal := GetGpuMilliLeftTotal(nodeRes)
+		if fragType == Q3Satisfied { // Part of GPUs are treated as Lack GPU fragment
+			gpuFragMilli := GetGpuFragMilliByNodeResAndPodRes(nodeRes, pod.TargetPodResource)
+			fragAmount.AddByFragType(Q2LackGpu, freq*float64(gpuFragMilli))
+			fragAmount.AddByFragType(Q3Satisfied, freq*float64(gpuMilliLeftTotal-gpuFragMilli))
+		} else { // Q1, Q2, XL, XR, NA => all idle GPU resources are treated as fragment
+			fragAmount.AddByFragType(fragType, freq*float64(gpuMilliLeftTotal))
+		}
+	}
+	return fragAmount
+}
+
+func (fa FragAmount) AddByFragType(fragType string, amount float64) error {
+	if amount < 0 {
+		return fmt.Errorf("bad freq")
+	}
+	if index, ok := FragRatioDataMap[fragType]; !ok {
+		return fmt.Errorf("bad fragType")
+	} else {
+		fa.Data[index] += amount
+		return nil
+	}
+}
+
+func GetGpuFragMilliByNodeResAndPodRes(nodeRes simontype.NodeResource, podRes simontype.PodResource) int64 {
+	gpuFragMilli := int64(0)
+	for _, milliGpuLeft := range nodeRes.MilliGpuLeftList {
+		if milliGpuLeft < podRes.MilliGpu {
+			gpuFragMilli += milliGpuLeft
+		}
+	}
+	return gpuFragMilli
+}
+
+func GetGpuMilliLeftTotal(nodeRes simontype.NodeResource) (gpuMilliLeftTotal int64) {
+	for _, gpuMilliLeft := range nodeRes.MilliGpuLeftList {
+		gpuMilliLeftTotal += gpuMilliLeft
+	}
+	return gpuMilliLeftTotal
+}
+
+func GetNodePodFrag(nodeRes simontype.NodeResource, podRes simontype.PodResource) string {
+	if podRes.MilliGpu == 0 {
+		if nodeRes.MilliCpuLeft >= podRes.MilliCpu {
+			return XLSatisfied
+		} else {
+			return XRLackCPU
+		}
+	}
+
+	if IsNodeAccessibleToPod(nodeRes, podRes) == false {
+		return NoAccess
+	}
+
+	if CanNodeHostPodOnGpuMemory(nodeRes, podRes) {
+		if nodeRes.MilliCpuLeft >= podRes.MilliCpu {
+			return Q3Satisfied
+		} else {
+			return Q4LackCpu
+		}
+	} else {
+		if nodeRes.MilliCpuLeft >= podRes.MilliCpu {
+			return Q2LackGpu
+		} else {
+			return Q1LackBoth
+		}
+	}
+}
+
+func IsNodeAccessibleToPod(nodeRes simontype.NodeResource, podRes simontype.PodResource) bool {
+	pt := podRes.GpuType
+	nt := nodeRes.GpuType
+	return IsNodeAccessibleToPodByType(nt, pt)
+}
+
+func IsNodeAccessibleToPodByType(nodeGpuType string, podGpuType string) bool {
+	if len(podGpuType) == 0 {
+		return true
+	}
+	if len(nodeGpuType) == 0 {
+		return false // i.e., CPU node
+	}
+
+	podGpuTypeList := strings.Split(podGpuType, "|")
+	cnt := 0
+	for _, gpuType := range podGpuTypeList {
+		if len(gpuType) == 0 {
+			continue
+		}
+		cnt++
+		if gpuType == nodeGpuType {
+			return true
+		}
+	}
+	if cnt > 0 { // pod requests at least one specific GPU type but node doesn't match
+		return false
+	} else { // pod actually doesn't request any specific GPU type
+		return true
+	}
+}
+
+func CanNodeHostPodOnGpuMemory(nodeRes simontype.NodeResource, podRes simontype.PodResource) bool {
+	gpuRequest := podRes.GpuNumber
+	for _, gpuHostMem := range nodeRes.MilliGpuLeftList {
+		if gpuHostMem >= podRes.MilliGpu {
+			gpuRequest -= 1
+			if gpuRequest <= 0 {
+				return true
+			}
+		}
+	}
+	return false
 }

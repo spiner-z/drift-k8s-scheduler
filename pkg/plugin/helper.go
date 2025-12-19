@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"math"
 	"strconv"
 
 	v1 "k8s.io/api/core/v1"
@@ -46,6 +47,25 @@ func gpuPointsUsedOnNode(ni *framework.NodeInfo) int64 {
 		sum += p * n
 	}
 	return sum
+}
+
+func getGpuCountFromNode(ni *framework.NodeInfo) int64 {
+	if ni == nil {
+		return 0
+	}
+	node := ni.Node()
+	if node == nil {
+		return 0
+	}
+	s := node.Labels[GPUCountLabelKey]
+	if s == "" {
+		return 0
+	}
+	gpuCount, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || gpuCount < 0 {
+		return 0
+	}
+	return gpuCount
 }
 
 func gpuCapacityPointsFromLabel(ni *framework.NodeInfo) (int64, *framework.Status) {
@@ -104,4 +124,8 @@ func gpuPointsFromPod(pod *v1.Pod) (int64, *framework.Status) {
 		return 0, framework.NewStatus(framework.UnschedulableAndUnresolvable, "gpu-points must be in [0,1000]")
 	}
 	return n, nil
+}
+
+func sigmoid(x float64) float64 { //Sigmoid Activation
+	return 1.0 / (1.0 + math.Exp(-x))
 }
