@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	GPUPointsLabelKey       = "drift.io/gpu-points"
-	GPUCountLabelKey        = "nvidia.com/gpu.count"
-	GPUPointsPerCard  int64 = 1000
+	GPUPointsLabelKey         = "drift.io/gpu-points"  // for both
+	GPUReqCountLabelKey       = "drift.io/gpu-count"   // for pod
+	GPUCountLabelKey          = "nvidia.com/gpu.count" // for node
+	GPUPointsPerCard    int64 = 1000
 )
 
 func gpuPointsUsedOnNode(ni *framework.NodeInfo) int64 {
@@ -26,15 +27,23 @@ func gpuPointsUsedOnNode(ni *framework.NodeInfo) int64 {
 		if pi.Pod.Status.Phase == v1.PodSucceeded || pi.Pod.Status.Phase == v1.PodFailed {
 			continue
 		}
-		v := pi.Pod.Labels[GPUPointsLabelKey]
-		if v == "" {
+		points := pi.Pod.Labels[GPUPointsLabelKey]
+		if points == "" {
 			continue
 		}
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || n <= 0 {
+		p, err := strconv.ParseInt(points, 10, 64)
+		if err != nil || p <= 0 {
 			continue
 		}
-		sum += n
+		count := pi.Pod.Labels[GPUReqCountLabelKey]
+		var n int64 = 1
+		if count != "" {
+			n, err = strconv.ParseInt(count, 10, 64)
+			if err != nil || n <= 0 {
+				n = 1
+			}
+		}
+		sum += p * n
 	}
 	return sum
 }
@@ -62,6 +71,21 @@ func gpuCapacityPointsFromLabel(ni *framework.NodeInfo) (int64, *framework.Statu
 		)
 	}
 	return gpuCount * GPUPointsPerCard, nil
+}
+
+func gpuCountFromPod(pod *v1.Pod) (int64, *framework.Status) {
+	if pod == nil {
+		return 0, framework.NewStatus(framework.Error, "nil pod")
+	}
+	val, ok := pod.Labels[GPUReqCountLabelKey]
+	if !ok || val == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(val, 10, 64)
+	if err != nil {
+		return 0, framework.NewStatus(framework.UnschedulableAndUnresolvable, "invalid gpu-count label (must be int64)")
+	}
+	return n, nil
 }
 
 func gpuPointsFromPod(pod *v1.Pod) (int64, *framework.Status) {

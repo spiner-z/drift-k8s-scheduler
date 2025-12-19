@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 
+	simontype "github.com/spiner-z/drift-k8s-scheduler/pkg/type"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/kubernetes/pkg/scheduler/framework" // 调度框架接口定义
@@ -15,12 +16,14 @@ const PluginName = "DriftPlugin"
 func New(ctx context.Context, cfg runtime.Object, h framework.Handle) (framework.Plugin, error) {
 	_ = ctx
 	_ = cfg
-	return &DriftPlugin{handle: h}, nil
+	t := initTypicalPods()
+	return &DriftPlugin{handle: h, typicalPods: t}, nil
 }
 
 // 插件结构体定义
 type DriftPlugin struct {
-	handle framework.Handle // 调度器可以通过 handle 访问集群状态等，暂不使用
+	handle      framework.Handle // 调度器可以通过 handle 访问集群状态等，暂不使用
+	typicalPods *simontype.TargetPodList
 }
 
 // Name 方法返回插件名称
